@@ -1,1 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Kilowott PIM System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 p-6">
+    <div class="max-w-5xl mx-auto">
+        <h1 class="text-3xl font-bold text-indigo-800 mb-6">PIM Catalog Manager</h1>
 
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <div class="bg-white p-6 rounded-xl shadow-md border border-gray-200">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">Add New Product</h2>
+                <div class="space-y-4">
+                    <input id="prodName" type="text" placeholder="Product Name" class="w-full p-2 border rounded">
+                    <input id="prodSKU" type="text" placeholder="SKU (e.g., KILO-001)" class="w-full p-2 border rounded">
+                    <input id="prodPrice" type="number" placeholder="Price" class="w-full p-2 border rounded">
+                    
+                    <div class="p-3 bg-indigo-50 rounded border border-indigo-100">
+                        <p class="text-xs font-bold text-indigo-600 mb-2 uppercase">Attribute Handling</p>
+                        <div class="flex gap-2">
+                            <input id="attrLabel" type="text" placeholder="Label (e.g. Color)" class="w-1/2 p-2 text-sm border rounded">
+                            <input id="attrValue" type="text" placeholder="Value (e.g. Red)" class="w-1/2 p-2 text-sm border rounded">
+                        </div>
+                    </div>
+                    
+                    <button id="syncBtn" onclick="syncToWooCommerce()" class="w-full bg-indigo-600 text-white font-bold py-2 rounded hover:bg-indigo-700 transition-all">
+                        Save to Catalog & Sync
+                    </button>
+                    <button id="addAnotherBtn" onclick="resetForm()" class="w-full mt-2 bg-gray-500 text-white font-bold py-2 rounded hover:bg-gray-600 transition-all hidden">
+                        Add Another Product
+                    </button>
+                </div>
+            </div>
+
+            <div class="bg-slate-900 p-6 rounded-xl shadow-md text-green-400 font-mono text-sm">
+                <h2 class="text-white font-semibold mb-4 border-b border-slate-700 pb-2">WooCommerce Sync Payload</h2>
+                <pre id="outputJSON" class="whitespace-pre-wrap">// Ready to sync...</pre>
+                <div id="syncStatus" class="mt-4 p-2 bg-slate-800 rounded hidden text-center uppercase tracking-widest text-xs">
+                    Syncing...
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-8 bg-white p-6 rounded-xl shadow-md border border-gray-200">
+            <h2 class="text-xl font-semibold mb-4 text-gray-700">Added Products</h2>
+            <div id="addedProducts" class="text-left text-gray-700 text-sm" style="max-height: 320px; overflow-y: auto;">
+                <div id="addedProductsList" class="space-y-2">No products added yet.</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // 0. Local client state to keep product objects by SKU (with merged attributes)
+    const STORAGE_KEY = 'pimAddedProducts';
+    const productBySku = new Map();
+
+    function loadProducts() {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return;
+        try {
+            const data = JSON.parse(raw);
+            for (const sku in data) {
+                if (Object.prototype.hasOwnProperty.call(data, sku)) {
+                    productBySku.set(sku, data[sku]);
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to parse saved product data:', e);
+            localStorage.removeItem(STORAGE_KEY);
+        }
+    }
+
+    function saveProducts() {
+        const data = {};
+        for (const [sku, product] of productBySku) {
+            data[sku] = product;
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    }
+
+    function mergeAttributes(existingAttrs, newAttrs) {
+        const merged = JSON.parse(JSON.stringify(existingAttrs));
+
+        for (const incoming of newAttrs) {
+            const found = merged.find(attr => attr.name.toLowerCase() === incoming.name.toLowerCase());
+            if (found) {
+                for (const option of incoming.options) {
+                    if (!found.options.includes(option)) {
+                        found.options.push(option);
+                    }
+                }
+            } else {
+                merged.push({...incoming});
+            }
+        }
+
+        return merged;
+    }
+
+    // 1. Attribute Handling Logic
+    function mapAttributes(label, value) {
+        return [{
+            name: label,
+            visible: true,
+            variation: false,
+            options: [value]
+        }];
+    }
+
+    // 2. Data Synchronization (The Actual API Call)
+    async function syncToWooCommerce() {
+        const btn = document.getElementById('syncBtn');
+        const status = document.getElementById('syncStatus');
+        const output = document.getElementById('outputJSON');
+        
+        // Validation
+        const name = document.getElementById('prodName').value;
+        const sku = document.getElementById('prodSKU').value;
+        if(!name || !sku) {
+            alert("Please enter at least Name and SKU");
+            return;
+        }
+
+        // Product Data Mapping
+        const attrLabel = document.getElementById('attrLabel').value.trim();
+        const attrValue = document.getElementById('attrValue').value.trim();
+
+        const productData = {
+            name: name,
+            type: "simple",
+            regular_price: String(document.getElementById('prodPrice').value),
+            sku: sku,
+            attributes: mapAttributes(attrLabel, attrValue)
+        };
+
+        // If product exists with same SKU, merge attributes and show existing product state.
+        if (productBySku.has(sku)) {
+            const existing = productBySku.get(sku);
+            const mergedAttributes = mergeAttributes(existing.attributes, productData.attributes);
+
+            // compare for no-change scenario
+            const sameAttrs = JSON.stringify(mergedAttributes) === JSON.stringify(existing.attributes);
+            if (sameAttrs) {
+                status.classList.remove('hidden', 'bg-green-900', 'text-green-300', 'bg-red-900', 'text-red-300');
+                status.classList.add('bg-yellow-900', 'text-yellow-200');
+                status.innerText = "⚠️ Same SKU and attributes already added";
+                output.innerText = JSON.stringify(existing, null, 2);
+                document.getElementById('addAnotherBtn').classList.remove('hidden');
+                btn.disabled = false;
+                btn.innerText = "Save to Catalog & Sync";
+                return;
+            }
+
+            const updatedProduct = {...existing, attributes: mergedAttributes};
+            productBySku.set(sku, updatedProduct);
+            saveProducts();
+            output.innerText = JSON.stringify(updatedProduct, null, 2);
+            status.classList.remove('hidden', 'bg-red-900', 'text-red-300', 'bg-green-900', 'text-green-300');
+            status.classList.add('bg-green-900', 'text-green-300');
+            status.innerText = "✅ SKU exists; attributes merged with previous values";
+            document.getElementById('addAnotherBtn').classList.remove('hidden');
+            btn.disabled = false;
+            btn.innerText = "Sync Successful";
+            renderAddedProducts();
+            return;
+        }
+
+        // UI Update
+        output.innerText = JSON.stringify(productData, null, 2);
+        btn.disabled = true;
+        btn.innerText = "Syncing...";
+        status.classList.remove('hidden', 'bg-green-900', 'text-green-300', 'bg-red-900', 'text-red-300');
+        status.innerText = "Connecting to WooCommerce API...";
+
+        try {
+            const response = await fetch('/api/sync-to-woo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(productData)
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                status.innerText = "✅ HTTP 201: Product Created Successfully";
+                status.classList.add('bg-green-900', 'text-green-300');
+                btn.innerText = "Sync Successful";
+                document.getElementById('addAnotherBtn').classList.remove('hidden');
+
+                // Remember synced product for future attribute merges
+                productBySku.set(sku, productData);
+                saveProducts();
+                renderAddedProducts();
+            } else {
+                throw new Error("Server error");
+            }
+        } catch (error) {
+            status.innerText = "❌ Sync Failed: Check Backend Connection";
+            status.classList.add('bg-red-900', 'text-red-300');
+            btn.disabled = false;
+            btn.innerText = "Try Sync Again";
+        }
+    }
+
+    function renderAddedProducts() {
+        const container = document.getElementById('addedProductsList');
+        container.innerHTML = '';
+
+        if (productBySku.size === 0) {
+            container.innerHTML = '<p class="text-xs text-slate-300">No products added yet.</p>';
+            return;
+        }
+
+        for (const [sku, product] of productBySku) {
+            const card = document.createElement('div');
+            card.className = 'mb-2 p-2 bg-slate-700 rounded';
+            card.innerHTML = `
+                <div class='flex justify-between items-start gap-2'>
+                    <div>
+                        <b>${product.name}</b> <span class='text-slate-300'>(SKU: ${sku})</span><br>
+                        <span class='text-slate-300 text-xs'>Attrs: ${product.attributes.map(a => `${a.name}: ${a.options.join(', ')}`).join(' | ')}</span>
+                    </div>
+                    <div class='flex gap-1'>
+                        <button onclick="editProduct('${sku}')" class='px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-500'>Edit</button>
+                        <button onclick="removeProduct('${sku}')" class='px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-500'>Remove</button>
+                    </div>
+                </div>`;
+            container.appendChild(card);
+        }
+    }
+
+    function editProduct(sku) {
+        const product = productBySku.get(sku);
+        if (!product) return;
+
+        document.getElementById('prodName').value = product.name;
+        document.getElementById('prodSKU').value = product.sku;
+        document.getElementById('prodPrice').value = product.regular_price || '';
+
+        const firstAttr = product.attributes[0] || {name: '', options: ['']};
+        document.getElementById('attrLabel').value = firstAttr.name;
+        document.getElementById('attrValue').value = firstAttr.options[0] || '';
+
+        document.getElementById('syncStatus').classList.add('hidden');
+        document.getElementById('addAnotherBtn').classList.remove('hidden');
+    }
+
+    function removeProduct(sku) {
+        if (!productBySku.has(sku)) return;
+
+        productBySku.delete(sku);
+        saveProducts();
+        renderAddedProducts();
+
+        const status = document.getElementById('syncStatus');
+        status.classList.remove('hidden', 'bg-red-900', 'text-red-300', 'bg-green-900', 'text-green-300', 'bg-yellow-900', 'text-yellow-200');
+        status.classList.add('bg-red-900', 'text-red-300');
+        status.innerText = `❌ Removed product SKU: ${sku}`;
+
+        if (productBySku.size === 0) {
+            resetForm();
+        }
+    }
+
+    function resetForm() {
+        document.getElementById('prodName').value = '';
+        document.getElementById('prodSKU').value = '';
+        document.getElementById('prodPrice').value = '';
+        document.getElementById('attrLabel').value = '';
+        document.getElementById('attrValue').value = '';
+
+        document.getElementById('outputJSON').innerText = '// Ready to sync...';
+
+        const status = document.getElementById('syncStatus');
+        status.className = 'mt-4 p-2 bg-slate-800 rounded hidden text-center uppercase tracking-widest text-xs';
+        status.innerText = '';
+
+        const btn = document.getElementById('syncBtn');
+        btn.disabled = false;
+        btn.innerText = 'Save to Catalog & Sync';
+
+        document.getElementById('addAnotherBtn').classList.add('hidden');
+    }
+
+    // Initialize data from localStorage and render list
+    loadProducts();
+    renderAddedProducts();
+</script>
+</body>
+</html>
