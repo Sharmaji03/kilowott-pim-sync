@@ -1,1 +1,0 @@
-# kilowott-pim-sync
